@@ -1,0 +1,41 @@
+# ---- Orchestration ----
+langgraph>=0.2.50
+langchain>=0.3.0
+langchain-core>=0.3.0
+
+# ---- LLM providers ----
+langchain-google-genai>=2.0.0
+langchain-groq>=0.2.0
+openai>=1.50.0                 # DeepSeek uses OpenAI-compatible API
+
+# ---- MCP ----
+mcp>=1.0.0                     # Official Model Context Protocol SDK
+
+# ---- Paper parsing ----
+pymupdf>=1.24.0                # fitz
+pypdf>=4.0.0                   # fallback parser
+
+# ---- Retrieval / embeddings ----
+chromadb>=0.5.0
+sentence-transformers>=3.0.0
+
+# ---- External APIs ----
+httpx>=0.27.0
+tenacity>=8.5.0                # retry/backoff for rate limits
+
+# ---- Sandbox / stats ----
+numpy>=1.26.0
+scipy>=1.13.0
+
+# ---- UI / demo ----
+streamlit>=1.38.0
+
+# ---- Evaluation ----
+scikit-learn>=1.5.0            # cosine sim for disagreement metric
+pandas>=2.2.0
+
+# ---- Dev / utilities ----
+python-dotenv>=1.0.0
+pydantic>=2.8.0
+rich>=13.7.0                   # nicer logs
+pytest>=8.3.0

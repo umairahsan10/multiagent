@@ -1,0 +1,13 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/chroma/
+data/papers/
+data/cache/
+*.log
+.DS_Store
+.idea/
+.vscode/
