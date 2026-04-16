@@ -6,7 +6,8 @@ langchain-core>=0.3.0
 # ---- LLM providers ----
 langchain-google-genai>=2.0.0
 langchain-groq>=0.2.0
-openai>=1.50.0                 # DeepSeek uses OpenAI-compatible API
+langchain-openai>=0.2.0        # used for OpenRouter (OpenAI-compatible)
+openai>=1.50.0
 
 # ---- MCP ----
 mcp>=1.0.0                     # Official Model Context Protocol SDK
