@@ -30,7 +30,7 @@ class Config:
     DISAGREEMENT_THRESHOLD = float(os.getenv("DISAGREEMENT_THRESHOLD", "0.35"))
 
     # Sandbox
-    SANDBOX_TIMEOUT = int(os.getenv("SANDBOX_TIMEOUT", "5"))
+    SANDBOX_TIMEOUT = int(os.getenv("SANDBOX_TIMEOUT", "15"))
 
     # Logging
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

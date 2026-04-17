@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm -f /tmp/p3.log)",
+      "Bash(.venv/Scripts/python.exe -u scripts/test_phase3_servers.py)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(time .venv/Scripts/python.exe -c ' *)"
+    ]
+  }
+}

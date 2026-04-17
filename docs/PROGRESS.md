@@ -185,10 +185,71 @@ is near zero.
 
 ---
 
+## Phase 3 — Three more MCP servers (stats_verifier, openalex, rag)
+
+**Goal:** finish the MCP layer. Every reviewer in Phase 4 has the tools it needs.
+
+### Files created
+
+| File | Purpose |
+|---|---|
+| [src/mcp_servers/stats_verifier.py](../src/mcp_servers/stats_verifier.py) | Python sandbox via `subprocess` with timeout. Tools: `run_python_sandbox(code, timeout)`, `check_t_statistic(t, df)`. Used by Methodology reviewer to sanity-check numerical claims (e.g. recompute a reported p-value). |
+| [src/mcp_servers/openalex.py](../src/mcp_servers/openalex.py) | OpenAlex REST client. Tools: `search_works`, `search_related`, `get_work`, `get_references`, `get_citations`, `verify_paper_exists`. No API key needed; passes `mailto=<email>` for the polite pool. Used by Novelty reviewer + Hallucination auditor. |
+| [src/mcp_servers/rag.py](../src/mcp_servers/rag.py) | ChromaDB persistent collection + sentence-transformers `all-MiniLM-L6-v2` (384-dim). Tools: `index_paper`, `query_corpus`, `corpus_stats`, `clear_corpus`. Used by Novelty reviewer to surface papers the citation graph missed. |
+| [scripts/test_phase3_servers.py](../scripts/test_phase3_servers.py) | Smoke tests for all three servers — sandbox math + timeout, OpenAlex search + verify (real + fake paper), Chroma index + query round-trip. |
+
+### Two non-obvious gotchas
+
+1. **Eager imports for any heavy library used in tool handlers.** Lazy `import scipy.stats` inside an async tool handler deadlocks the asyncio event loop on Python 3.14 / Windows. Same for ChromaDB + sentence-transformers init. Both servers now import everything at module load (synchronously, before `mcp.run()`). Cost: server startup is ~10s once cached. Benefit: every subsequent call is millisecond-fast and the loop never blocks past the MCP request timeout.
+2. **First sentence-transformers run downloads ~80MB.** Cold install of `all-MiniLM-L6-v2` from HuggingFace took 51s on this machine. Cached after that. Worth flagging for first-run setup.
+
+### Verified results
+
+```
+stats_verifier:
+  numpy mean test       -> 3.0           (0.3s)
+  check_t_statistic     -> p=0.0191      (0.0s)
+  while-True + 2s tmout -> timed_out=True (2.1s)
+
+openalex:
+  search('attention is all you need transformer', k=3) -> 3 works returned
+  verify('Attention Is All You Need', 2017)            -> exists=True conf=1.0
+  verify('Quantum Kangaroos in RL', 2099)              -> exists=False conf=0.143
+
+rag:
+  initial corpus_stats     -> {chunks: 0}
+  index_paper(aiayn)       -> {indexed: 1}
+  query('multi-head self-attention')
+                           -> 1 hit, dist=0.426, title='Attention Is All You Need'
+```
+
+### Updated client registry
+
+[src/clients/mcp_client.py](../src/clients/mcp_client.py) now exposes four servers:
+
+```python
+SERVER_MODULES = {
+    "paper_parser":   "src.mcp_servers.paper_parser",
+    "stats_verifier": "src.mcp_servers.stats_verifier",
+    "openalex":       "src.mcp_servers.openalex",
+    "rag":            "src.mcp_servers.rag",
+}
+```
+
+### How to verify Phase 3
+
+```bash
+.venv/Scripts/python.exe scripts/test_phase3_servers.py
+```
+
+First run takes ~60s (model download). Subsequent runs ~10s.
+
+---
+
 ## What's next
 
-**Phase 3 — three more MCP servers:** OpenAlex (scholarly metadata, citation
-graph, abstract retrieval), RAG (ChromaDB + sentence-transformers over a small
-domain corpus), and stats_verifier (Python sandbox for numerical verification).
-Once these land, Phase 4 builds the remaining three reviewers (Novelty,
-Devil's Advocate, Ethics) on top of them.
+**Phase 4 — three more reviewers:** Novelty (uses paper_parser + openalex + rag),
+Devil's Advocate (uses paper_parser only — argues for rejection), Ethics (uses
+paper_parser + openalex). Each gets a sharp persona prompt distinct enough that
+the four reviewers will disagree meaningfully — the disagreement is what the
+debate loop in Phase 6 metabolizes.

@@ -20,7 +20,9 @@ from mcp.client.stdio import stdio_client
 
 SERVER_MODULES = {
     "paper_parser": "src.mcp_servers.paper_parser",
-    # phase 3 servers will be added here
+    "stats_verifier": "src.mcp_servers.stats_verifier",
+    "openalex": "src.mcp_servers.openalex",
+    "rag": "src.mcp_servers.rag",
 }
 
 
