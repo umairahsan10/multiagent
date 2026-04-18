@@ -3,6 +3,20 @@
 Tracks what's been built, what each file does, and how to verify each phase.
 The full design lives in [readme.md](../readme.md); this file is the build log.
 
+## Status overview
+
+| Phase | Title | Status |
+|---|---|---|
+| 0 | Project scaffolding + env setup | ✅ Done |
+| 1 | Paper-parser MCP server | ✅ Done |
+| 2 | Methodology reviewer agent | ✅ Done |
+| 3 | stats_verifier + openalex + rag MCP servers | ✅ Done |
+| 4 | Novelty + Devil's Advocate + Ethics reviewers | ⏳ Planned |
+| 5 | Editor orchestrator + Round-1 fan-out + disagreement detection | ⏳ Planned |
+| 6 | A2A debate loop + contested-claims synthesis | ⏳ Planned |
+| 7 | Streamlit UI + evaluation harness | ⏳ Planned |
+| 8 | Hallucination auditor + ablations + report assets | ⏳ Planned |
+
 ---
 
 ## Phase 0 — Project scaffolding + env setup
@@ -246,10 +260,209 @@ First run takes ~60s (model download). Subsequent runs ~10s.
 
 ---
 
-## What's next
+## Phase 4 — Novelty, Devil's Advocate, Ethics reviewers (PLANNED)
 
-**Phase 4 — three more reviewers:** Novelty (uses paper_parser + openalex + rag),
-Devil's Advocate (uses paper_parser only — argues for rejection), Ethics (uses
-paper_parser + openalex). Each gets a sharp persona prompt distinct enough that
-the four reviewers will disagree meaningfully — the disagreement is what the
-debate loop in Phase 6 metabolizes.
+**Goal:** complete the four-reviewer panel. By the end of this phase, calling
+each reviewer on the same paper produces four distinct, evidence-backed,
+schema-conformant `Review` objects that visibly disagree.
+
+### Files to create
+
+| File | Purpose |
+|---|---|
+| `src/agents/novelty_reviewer.py` | Persona: novelty-judging reviewer. Uses `paper_parser` + `openalex` + `rag`. Prompt instructs the model to (a) extract the paper's main claimed contribution, (b) generate 3 candidate prior works that might invalidate the claim, (c) verify each via `openalex.verify_paper_exists` + `openalex.search_related`, then (d) pull RAG hits for additional comparators the citation graph missed. Required `criterion_scores`: novelty, contribution, prior_art_coverage. |
+| `src/agents/devils_advocate_reviewer.py` | Persona: deliberately argues for rejection. Uses `paper_parser` only. Prompt: "assume the authors have presented their work in the most favorable possible light — find the three strongest reasons a careful reader might still reject it." Constrained: the `confidence` field on each concern must be honestly calibrated (a weak objection at 0.4 is preferred over a strong-sounding one at 0.95 with no evidence). Required `criterion_scores`: rigor_skepticism, claim_overreach, presentation_issues. |
+| `src/agents/ethics_reviewer.py` | Persona: ethics + societal-impact reviewer. Uses `paper_parser` + `openalex`. Looks at: dataset bias / population coverage, dual-use concerns, claims that outrun the evidence, missing limitations. Cross-checks claimed comparisons-to-ethical-prior-work via OpenAlex. Required `criterion_scores`: dataset_ethics, dual_use, claim_calibration. Often has fewer (sharper) concerns than the technical reviewers — that's by design. |
+| `scripts/test_all_reviewers.py` | Runs all four reviewers in parallel on the test paper, prints a side-by-side score comparison and a per-pair disagreement summary, saves all four reviews to `data/round1/`. |
+
+### Key design decisions
+
+- **Prompt-level diversification.** The four personas differ on what counts as a *strength* vs. *concern*, what `criterion_scores` they emit, and which MCP tools they reach for. This is the source of structural disagreement — without it, even different LLMs give similar verdicts because they're answering the same question.
+- **Tool budget per reviewer.** Methodology has 2 tools (paper_parser + stats_verifier — wired up in this phase). Novelty has 3 (paper_parser + openalex + rag). Devil's Advocate has 1 (paper_parser only — its critique must come from the text alone). Ethics has 2 (paper_parser + openalex). Different tool sets → different evidence available → different conclusions.
+- **Methodology gets stats_verifier wired now.** Add `"stats_verifier"` to its `mcp_servers` list and update the persona prompt to tell it: "if the paper reports a t-statistic, F-statistic, or specific p-value, recompute it via the sandbox and flag any discrepancy."
+
+### How verification will work
+
+```bash
+.venv/Scripts/python.exe scripts/test_all_reviewers.py
+```
+
+Expected: four reviews in JSON, plus a printed table:
+
+```
+                   methodology   novelty   devils_adv   ethics
+overall_score      7.0           ?         ?            ?
+total_concerns     3             ?         ?            ?
+critical_concerns  0             ?         ?            ?
+unique_concerns    -             -         -            -
+```
+
+A "healthy" panel shows pairwise score differences of ≥1.5 on at least two
+pairs and at least one concern raised by exactly one reviewer. If everyone
+agrees, the personas are too similar — back to prompt-tuning.
+
+---
+
+## Phase 5 — Editor orchestrator + Round-1 fan-out + disagreement detection (PLANNED)
+
+**Goal:** the system becomes a real LangGraph. The editor distributes a paper
+to all four reviewers in parallel, aggregates their output, and computes which
+pairs disagree enough to warrant a debate round.
+
+### Files to create
+
+| File | Purpose |
+|---|---|
+| `src/agents/editor.py` | LangGraph node. Holds the `ReviewState` TypedDict (paper, round, reviews, a2a_thread, disagreements, verdict). Round 1: fan out to all four reviewers in parallel via LangGraph's parallel-edge primitive. |
+| `src/orchestrator/state.py` | The shared `ReviewState` TypedDict + helpers for safely merging parallel reviewer outputs. |
+| `src/orchestrator/disagreement.py` | Pure-function module: takes 4 reviews → returns a list of `Disagreement` objects. Uses two signals: (a) cosine distance between review-summary embeddings (sentence-transformers, reused from RAG server), (b) explicit contradictions in concern lists (same claim, opposite severity). Threshold defaults from `Config.DISAGREEMENT_THRESHOLD`. |
+| `src/orchestrator/graph.py` | LangGraph wiring. Defines nodes (each reviewer + editor), edges (paper → fan-out → editor), and the conditional edge that exits early if no disagreements above threshold. |
+| `scripts/test_round1.py` | Runs the LangGraph end-to-end for a single paper, prints the disagreement matrix, dumps state to `data/round1_state.json`. |
+
+### Key design decisions
+
+- **LangGraph state is the single source of truth.** The reviewers are pure functions over the paper; only the editor mutates state. All A2A messages (Phase 6) live in `state["a2a_thread"]` so the entire debate is replayable.
+- **Two-signal disagreement detection.** Embedding cosine alone is too noisy (two reviewers can write similar prose with opposite recommendations). Severity contradictions alone are too sparse (concerns rarely match by exact wording). Combining both is more robust.
+- **Naive aggregation in this phase.** A simple mean-of-overall-scores produces a placeholder verdict so we can compare against the post-debate verdict in Phase 6 (this comparison is the "no debate vs 3-round debate" ablation).
+
+### How verification will work
+
+```bash
+.venv/Scripts/python.exe scripts/test_round1.py
+```
+
+Expected:
+- Four reviews completed in parallel (~30-40s wall time, not 4× sequential).
+- Printed pairwise disagreement matrix (6 pairs, scores between 0 and 1).
+- A list of pairs above threshold (these become rebuttal-request targets in Phase 6).
+
+---
+
+## Phase 6 — A2A debate loop + contested-claims synthesis (PLANNED)
+
+**Goal:** when reviewers disagree, the editor brokers structured rebuttals.
+After up to 3 rounds, the editor synthesizes a verdict that explicitly preserves
+unresolved disagreements as "contested claims" rather than forcing consensus.
+
+### Files to create
+
+| File | Purpose |
+|---|---|
+| `src/orchestrator/a2a.py` | A2A message construction + routing. `make_rebuttal_request(challenger, target, claim)` produces a structured `A2AMessage`. The router appends to `state["a2a_thread"]` so the full exchange is auditable. |
+| `src/agents/rebuttal_handler.py` | Mixin or method added to `BaseReviewer`: when called with an `A2AMessage` of type `rebuttal_request`, the reviewer re-reads the relevant section of its own prior review and the challenger's evidence, then emits a `rebuttal_response` that either updates its position (with new `confidence`) or defends it (with new evidence). |
+| `src/orchestrator/graph.py` | Extended with the debate loop. Conditional edge: while round < `MAX_DEBATE_ROUNDS` and disagreements > threshold and at least one reviewer changed position last round, loop back to debate. Otherwise → synthesis. |
+| `src/agents/synthesis.py` | Final-verdict synthesizer (uses Editor LLM = Groq Llama 3.3 70B). Takes the full A2A thread + final reviews and emits a `Verdict` with `consensus_strengths`, `consensus_concerns`, and `contested_claims` (the part most automated reviewers omit). |
+| `scripts/test_full_debate.py` | E2E: paper in → 4 reviews → debate rounds → final verdict. Prints round-by-round summary and final verdict JSON. |
+
+### Key design decisions
+
+- **Termination is multi-condition.** Hard cap at 3 rounds, OR aggregate disagreement drops below threshold, OR no reviewer changed position between consecutive rounds (stalemate detection). A stalemate is not failure — those claims are recorded as `contested_claims` in the verdict.
+- **Rebuttal requests are typed messages, not plain strings.** A `rebuttal_request` carries the challenger's specific claim, the target's prior position, and the request body. The target must respond in a typed `rebuttal_response` (structured output again). This is the heart of the A2A protocol claim — without typed messages it would be just chat.
+- **Position changes are first-class.** The rebuttal handler returns a `position_changed: bool` flag. The editor uses this to detect stalemate.
+
+### How verification will work
+
+```bash
+.venv/Scripts/python.exe scripts/test_full_debate.py
+```
+
+Expected:
+- Round 1: 4 reviews printed.
+- Round 2 (if disagreements): rebuttal requests + responses logged. Some reviewers update scores.
+- Round 3 (if still disagreeing): final round.
+- Synthesis: a `Verdict` with at least one `contested_claim` entry on a real-world paper.
+
+A "healthy" debate shows score movement of ≥0.5 by at least one reviewer in round 2 or 3. If nobody ever updates, the rebuttal prompt isn't pushing hard enough.
+
+---
+
+## Phase 7 — Streamlit UI + evaluation harness (PLANNED)
+
+**Goal:** (a) a usable demo for the project presentation, (b) the evaluation
+infrastructure that produces the numbers in the IEEE report.
+
+### Files to create
+
+| File | Purpose |
+|---|---|
+| `app.py` | Streamlit app at the project root. File uploader for a PDF, "Run review" button, four reviewer panels showing each review with collapsible concern lists, a debate-thread visualization (timeline of A2A messages), and a final verdict card with `contested_claims` highlighted. ~150 lines. |
+| `src/evaluation/harness.py` | Batch runner: takes a list of `(pdf_path, ground_truth_decision)` tuples, runs the full pipeline on each, dumps results + metrics to JSON. |
+| `src/evaluation/metrics.py` | Four metric functions: `verdict_correlation` (system recommendation vs. real outcome), `issue_detection_pr` (precision/recall of system concerns vs. human-reviewer concerns — manual annotation comparison), `inter_agent_disagreement` (mean pairwise cosine distance, plotted as a histogram), `citation_hallucination_rate` (fraction of cited papers that fail OpenAlex verification). |
+| `scripts/fetch_openreview.py` | Pulls 30-50 papers + their human reviews + decisions from OpenReview (ICLR 2022-2024). Caches everything locally so the evaluation is reproducible offline. |
+| `scripts/run_evaluation.py` | Top-level: load OpenReview corpus → run harness → write `data/evaluation_results.json` and `data/evaluation_metrics.json`. |
+
+### Key design decisions
+
+- **The Streamlit app is read-mostly demo, not the primary interface.** Heavy lifting is the CLI evaluation harness; the UI just wraps it for presentation purposes.
+- **Manual concern-overlap annotation is unavoidable.** Issue-detection P/R requires a human (the project author) to read 20 papers' worth of human + system reviews and judge which concerns overlap. Budget time for this — 20 thoroughly-annotated papers > 50 skimmed.
+- **Caching is critical.** Every OpenReview paper, every parsed PDF, every OpenAlex query, every ChromaDB embedding is cached. Re-running the evaluation must not re-hit external APIs.
+
+### How verification will work
+
+```bash
+streamlit run app.py                                    # demo UI
+.venv/Scripts/python.exe scripts/fetch_openreview.py    # one-time corpus pull
+.venv/Scripts/python.exe scripts/run_evaluation.py      # full eval (~hours, runs overnight)
+```
+
+Expected outputs:
+- `data/evaluation_results.json` — full per-paper output (every review, debate thread, verdict).
+- `data/evaluation_metrics.json` — aggregate numbers ready to drop into the IEEE report.
+
+---
+
+## Phase 8 — Hallucination auditor + ablations + report assets (PLANNED)
+
+**Goal:** the polish phase. A post-hoc auditor catches fabricated citations,
+two ablation studies generate the comparative numbers the report rests on, and
+final assets (architecture diagram, results tables, presentation script) are
+produced.
+
+### Files to create
+
+| File | Purpose |
+|---|---|
+| `src/agents/hallucination_auditor.py` | Post-hoc auditor. Walks `state["reviews"]` and the A2A thread; for every paper-reference any reviewer cited, calls `openalex.verify_paper_exists`. Produces a per-review hallucination rate. Not a debater — runs after synthesis, not before. |
+| `src/evaluation/ablations.py` | Two ablation runners: (a) **single-model panel** — re-run evaluation with all four reviewers using Gemini, compare verdict quality + disagreement vs. heterogeneous panel; (b) **no-debate** — re-run with debate disabled (Phase 5 naive aggregation only), compare verdicts vs. full 3-round version. |
+| `docs/architecture.md` + `docs/architecture.svg` | One-page architecture diagram for the report. Shows MCP layer (4 servers) below the agent layer (4 reviewers + editor) with the two protocol families (MCP vs A2A) clearly distinguished. |
+| `docs/REPORT_ASSETS.md` | Results tables (verdict correlation, issue P/R, hallucination rate before/after auditor, both ablations) in markdown — copy/paste into the IEEE template. |
+| `docs/PRESENTATION.md` | 15-minute presentation script: 2 min motivation, 4 min architecture, 6 min demo + results, 2 min ethics, 1 min conclusion. |
+
+### Key design decisions
+
+- **Auditor is independent, not in-loop.** Putting it in the debate loop would let reviewers learn to avoid citations, which masks the underlying hallucination tendency. Run it post-hoc so the rate is honest.
+- **Report the rate before AND after the auditor.** The "before" number is the failure mode of an unaudited LLM-based reviewer; the "after" number is what your system actually delivers. The delta is the contribution.
+- **Both ablations are pre-registered.** Fix the ablation design (single-model vs. heterogeneous, no-debate vs. 3-round) before running them — don't post-hoc choose comparisons that flatter the system. The report will note which were pre-registered.
+
+### How verification will work
+
+```bash
+.venv/Scripts/python.exe scripts/run_evaluation.py --with-auditor
+.venv/Scripts/python.exe -m src.evaluation.ablations --variant single_model
+.venv/Scripts/python.exe -m src.evaluation.ablations --variant no_debate
+```
+
+Each writes a `data/ablation_<name>.json` for inclusion in the report.
+
+---
+
+## Cross-phase notes
+
+### Total dependency footprint
+
+By Phase 8 the project depends on: Python 3.11+ (using 3.14), LangGraph,
+LangChain (3 provider adapters), MCP SDK, PyMuPDF, ChromaDB,
+sentence-transformers (~80MB model), Streamlit, pandas, scikit-learn, scipy,
+numpy, pydantic, httpx, tenacity, rich, python-dotenv. All free, all open
+source. No paid services beyond LLM tokens (and even those have free tiers
+covering most of the project).
+
+### What this project is and isn't
+
+**Is:** a working multi-agent system with a real MCP/A2A separation, structured
+peer-review output that includes a debate trail and contested claims, and an
+evaluation methodology that produces defensible quantitative results.
+
+**Isn't:** a production peer-review service. Latency (45-90s/paper), cost
+(LLM tokens per run), and reliability (rate limits, occasional hallucinated
+citations) are fine for research/coursework but unsuitable for live deployment.
