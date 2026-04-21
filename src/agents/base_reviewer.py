@@ -13,12 +13,26 @@ emit a Pydantic-conformant JSON object. Way more reliable than regex-parsing.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from abc import ABC, abstractmethod
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from mcp import ClientSession
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
+
+_TRANSIENT_MARKERS = ("429", "resource_exhausted", "503", "unavailable", "timeout", "rate_limit", "overloaded")
+
+
+def _is_transient(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(m in msg for m in _TRANSIENT_MARKERS)
 
 from src.agents.llm_factory import Role, make_llm
 from src.clients.mcp_client import mcp_session, unwrap_tool_result
@@ -66,11 +80,29 @@ class BaseReviewer(ABC):
             SystemMessage(content=self.system_prompt),
             HumanMessage(content=self._build_user_prompt(context)),
         ]
-        result: Review = await self.structured_llm.ainvoke(messages)
+        result = await self._invoke_llm_with_retry(messages)
         result.reviewer_id = self.reviewer_id
         result.tool_calls = tool_calls
         log.info(f"[{self.reviewer_id}] score={result.overall_score} concerns={len(result.concerns)}")
         return result
+
+    async def _invoke_llm_with_retry(self, messages: list[Any]) -> Review:
+        # Retry on transient provider errors: 429 rate-limit, 5xx upstream unavailability.
+        # Exponential backoff starting 2s, up to 4 attempts (~24s cumulative worst-case).
+        # Non-transient errors (validation, auth) fail immediately.
+        attempt_idx = 0
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(4),
+            wait=wait_exponential(multiplier=2, min=2, max=30),
+            retry=retry_if_exception(_is_transient),
+            reraise=True,
+        ):
+            attempt_idx += 1
+            with attempt:
+                if attempt_idx > 1:
+                    log.warning(f"[{self.reviewer_id}] LLM retry attempt {attempt_idx}")
+                return await self.structured_llm.ainvoke(messages)
+        raise RuntimeError("unreachable")
 
     def _build_user_prompt(self, context: str) -> str:
         return (

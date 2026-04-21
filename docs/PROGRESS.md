@@ -11,7 +11,7 @@ The full design lives in [readme.md](../readme.md); this file is the build log.
 | 1 | Paper-parser MCP server | ✅ Done |
 | 2 | Methodology reviewer agent | ✅ Done |
 | 3 | stats_verifier + openalex + rag MCP servers | ✅ Done |
-| 4 | Novelty + Devil's Advocate + Ethics reviewers | ⏳ Planned |
+| 4 | Novelty + Devil's Advocate + Ethics reviewers | ✅ Done |
 | 5 | Editor orchestrator + Round-1 fan-out + disagreement detection | ⏳ Planned |
 | 6 | A2A debate loop + contested-claims synthesis | ⏳ Planned |
 | 7 | Streamlit UI + evaluation harness | ⏳ Planned |
@@ -260,20 +260,21 @@ First run takes ~60s (model download). Subsequent runs ~10s.
 
 ---
 
-## Phase 4 — Novelty, Devil's Advocate, Ethics reviewers (PLANNED)
+## Phase 4 — Novelty, Devil's Advocate, Ethics reviewers ✅ DONE
 
 **Goal:** complete the four-reviewer panel. By the end of this phase, calling
 each reviewer on the same paper produces four distinct, evidence-backed,
 schema-conformant `Review` objects that visibly disagree.
 
-### Files to create
+### Files created
 
 | File | Purpose |
 |---|---|
-| `src/agents/novelty_reviewer.py` | Persona: novelty-judging reviewer. Uses `paper_parser` + `openalex` + `rag`. Prompt instructs the model to (a) extract the paper's main claimed contribution, (b) generate 3 candidate prior works that might invalidate the claim, (c) verify each via `openalex.verify_paper_exists` + `openalex.search_related`, then (d) pull RAG hits for additional comparators the citation graph missed. Required `criterion_scores`: novelty, contribution, prior_art_coverage. |
-| `src/agents/devils_advocate_reviewer.py` | Persona: deliberately argues for rejection. Uses `paper_parser` only. Prompt: "assume the authors have presented their work in the most favorable possible light — find the three strongest reasons a careful reader might still reject it." Constrained: the `confidence` field on each concern must be honestly calibrated (a weak objection at 0.4 is preferred over a strong-sounding one at 0.95 with no evidence). Required `criterion_scores`: rigor_skepticism, claim_overreach, presentation_issues. |
-| `src/agents/ethics_reviewer.py` | Persona: ethics + societal-impact reviewer. Uses `paper_parser` + `openalex`. Looks at: dataset bias / population coverage, dual-use concerns, claims that outrun the evidence, missing limitations. Cross-checks claimed comparisons-to-ethical-prior-work via OpenAlex. Required `criterion_scores`: dataset_ethics, dual_use, claim_calibration. Often has fewer (sharper) concerns than the technical reviewers — that's by design. |
-| `scripts/test_all_reviewers.py` | Runs all four reviewers in parallel on the test paper, prints a side-by-side score comparison and a per-pair disagreement summary, saves all four reviews to `data/round1/`. |
+| [src/agents/novelty_reviewer.py](../src/agents/novelty_reviewer.py) | Persona: novelty-judging reviewer. Uses paper_parser + openalex + rag. Pulls contribution-relevant sections, searches OpenAlex for related works by title+abstract, queries the RAG corpus for semantically similar work. Criterion scores: novelty, contribution, prior_art_coverage. |
+| [src/agents/devils_advocate_reviewer.py](../src/agents/devils_advocate_reviewer.py) | Persona: deliberately argues for rejection. Paper_parser only. Prompt forces focus on the top 3 reasons for rejection; nitpicks are explicitly disallowed. Criterion scores: rigor_skepticism, claim_overreach, presentation_issues. |
+| [src/agents/ethics_reviewer.py](../src/agents/ethics_reviewer.py) | Persona: ethics + societal-impact reviewer. Paper_parser + openalex. Precision-over-recall prompt — small number of specific concerns is preferred to boilerplate. Criterion scores: dataset_ethics, dual_use, claim_calibration. |
+| [scripts/test_all_reviewers.py](../scripts/test_all_reviewers.py) | Runs all four reviewers in parallel (`asyncio.gather`), prints side-by-side score table, pairwise disagreement spread, representative concerns per reviewer. Saves each review to `data/round1/review_<id>.json`. |
+| [src/agents/base_reviewer.py](../src/agents/base_reviewer.py) updates | Added `_invoke_llm_with_retry` using tenacity: retries only on transient markers (`429`, `503`, `unavailable`, `rate_limit`, etc.) with exponential backoff 2→30s, max 4 attempts. |
 
 ### Key design decisions
 
@@ -281,25 +282,58 @@ schema-conformant `Review` objects that visibly disagree.
 - **Tool budget per reviewer.** Methodology has 2 tools (paper_parser + stats_verifier — wired up in this phase). Novelty has 3 (paper_parser + openalex + rag). Devil's Advocate has 1 (paper_parser only — its critique must come from the text alone). Ethics has 2 (paper_parser + openalex). Different tool sets → different evidence available → different conclusions.
 - **Methodology gets stats_verifier wired now.** Add `"stats_verifier"` to its `mcp_servers` list and update the persona prompt to tell it: "if the paper reports a t-statistic, F-statistic, or specific p-value, recompute it via the sandbox and flag any discrepancy."
 
-### How verification will work
+### Provider remap (learned the hard way)
+
+Original plan had two reviewers on Gemini. Reality:
+- Gemini 2.5 Flash free tier: 5 RPM **and** 20 requests/day. Two reviewers in parallel exhausted the daily limit in one test run.
+- Gemini 2.5 Flash-Lite free tier: 15 RPM, 1000/day. Way more headroom — swapped in.
+- Moved ethics off Gemini to Groq (Llama 3.3 70B — 30 RPM).
+- OpenRouter: gpt-oss-120b:free was unreliable for structured output (emitted `<|endoftext|>` mid-JSON). Switched to `nvidia/nemotron-3-super-120b-a12b:free` — stable.
+
+Final mapping in [src/agents/llm_factory.py](../src/agents/llm_factory.py):
+
+| Reviewer | Provider | Model |
+|---|---|---|
+| methodology | Google | gemini-2.5-flash-lite |
+| novelty | OpenRouter | nvidia/nemotron-3-super-120b-a12b:free |
+| devils_advocate | Groq | llama-3.3-70b-versatile |
+| ethics | Groq | llama-3.3-70b-versatile |
+| editor (Phase 5) | Groq | llama-3.3-70b-versatile |
+
+### Verified results on *Attention Is All You Need*
+
+```
+                     methodology   novelty   devils_adv   ethics
+overall_score        7.0           9.0       7.0          8.0
+num_strengths        3             2         2            2
+num_concerns         5             1         3            2
+critical_concerns    0             0         0            0
+major_concerns       3             0         2            0
+tool_calls           4             7         8            6
+
+Parallel wall time: 64.4s   (bounded by novelty — the slowest reviewer)
+
+Pairwise score spread:
+  methodology    vs novelty          Δ=2.0  *
+  methodology    vs devils_advocate  Δ=0.0
+  methodology    vs ethics           Δ=1.0
+  novelty        vs devils_advocate  Δ=2.0  *
+  novelty        vs ethics           Δ=1.0
+  devils_advocate vs ethics          Δ=1.0
+```
+
+Two pairs exceed the 1.5-point spread threshold — these become debate-round
+candidates in Phase 6. This is the key success metric for Phase 4: the panel
+actually disagrees. If score spreads were all <0.5, the four personas would
+be redundant and the debate phase would have nothing to resolve.
+
+### How to verify Phase 4
 
 ```bash
 .venv/Scripts/python.exe scripts/test_all_reviewers.py
 ```
 
-Expected: four reviews in JSON, plus a printed table:
-
-```
-                   methodology   novelty   devils_adv   ethics
-overall_score      7.0           ?         ?            ?
-total_concerns     3             ?         ?            ?
-critical_concerns  0             ?         ?            ?
-unique_concerns    -             -         -            -
-```
-
-A "healthy" panel shows pairwise score differences of ≥1.5 on at least two
-pairs and at least one concern raised by exactly one reviewer. If everyone
-agrees, the personas are too similar — back to prompt-tuning.
+Writes four reviews to [data/round1/](../data/round1/). Takes ~60-90s (dominated by novelty's Nemotron call).
 
 ---
 

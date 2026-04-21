@@ -36,8 +36,8 @@ class Config:
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
     # Model IDs — centralized so the heterogeneous-panel ablation is one-line swap
-    GEMINI_MODEL = "gemini-2.5-flash"
-    OPENROUTER_MODEL = "openai/gpt-oss-120b:free"
+    GEMINI_MODEL = "gemini-2.5-flash-lite"  # flash (5 RPM, 20/day free) → flash-lite (15 RPM, 1000/day free)
+    OPENROUTER_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"  # was gpt-oss-120b; emitted <|endoftext|> mid-structured-output
     GROQ_MODEL = "llama-3.3-70b-versatile"
 
     @classmethod

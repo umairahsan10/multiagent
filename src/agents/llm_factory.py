@@ -22,7 +22,7 @@ ROLE_TO_PROVIDER: dict[Role, Provider] = {
     "methodology": "gemini",
     "novelty": "openrouter",
     "devils_advocate": "groq",
-    "ethics": "gemini",
+    "ethics": "groq",       # moved off Gemini: free tier is 5 req/min, clashes with methodology
     "editor": "groq",
 }
 
@@ -42,10 +42,12 @@ def make_llm(role: Role, temperature: float = 0.3) -> BaseChatModel:
             temperature=temperature,
         )
     if provider == "openrouter":
+        # gpt-oss-120b uses reasoning tokens, so give structured output extra headroom
         return ChatOpenAI(
             model=Config.OPENROUTER_MODEL,
             api_key=Config.OPENROUTER_API_KEY,
             base_url=Config.OPENROUTER_BASE_URL,
             temperature=temperature,
+            max_completion_tokens=16384,
         )
     raise ValueError(f"unknown provider: {provider}")
