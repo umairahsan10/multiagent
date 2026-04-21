@@ -70,6 +70,16 @@ class ContestedClaim(BaseModel):
     editor_note: str
 
 
+class Disagreement(BaseModel):
+    """A pair of reviewers whose reviews diverge enough to warrant a debate round."""
+    reviewer_a: str
+    reviewer_b: str
+    score_spread: float          # |score_a - score_b|, 0-9
+    summary_cosine_distance: float  # 0-1, 1 = opposite
+    combined_score: float        # weighted combination, 0-1
+    flagged: bool                # combined_score >= DISAGREEMENT_THRESHOLD
+
+
 class Verdict(BaseModel):
     recommendation: Literal["accept", "reject", "revise"]
     confidence: float = Field(ge=0.0, le=1.0)
@@ -78,3 +88,4 @@ class Verdict(BaseModel):
     consensus_concerns: list[Concern] = Field(default_factory=list)
     contested_claims: list[ContestedClaim] = Field(default_factory=list)
     suggested_revisions: list[str] = Field(default_factory=list)
+    summary: str = ""

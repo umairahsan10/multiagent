@@ -12,7 +12,7 @@ The full design lives in [readme.md](../readme.md); this file is the build log.
 | 2 | Methodology reviewer agent | ✅ Done |
 | 3 | stats_verifier + openalex + rag MCP servers | ✅ Done |
 | 4 | Novelty + Devil's Advocate + Ethics reviewers | ✅ Done |
-| 5 | Editor orchestrator + Round-1 fan-out + disagreement detection | ⏳ Planned |
+| 5 | Editor orchestrator + Round-1 fan-out + disagreement detection | ✅ Done |
 | 6 | A2A debate loop + contested-claims synthesis | ⏳ Planned |
 | 7 | Streamlit UI + evaluation harness | ⏳ Planned |
 | 8 | Hallucination auditor + ablations + report assets | ⏳ Planned |
@@ -337,21 +337,22 @@ Writes four reviews to [data/round1/](../data/round1/). Takes ~60-90s (dominated
 
 ---
 
-## Phase 5 — Editor orchestrator + Round-1 fan-out + disagreement detection (PLANNED)
+## Phase 5 — Editor orchestrator + Round-1 fan-out + disagreement detection ✅ DONE
 
 **Goal:** the system becomes a real LangGraph. The editor distributes a paper
 to all four reviewers in parallel, aggregates their output, and computes which
 pairs disagree enough to warrant a debate round.
 
-### Files to create
+### Files created
 
 | File | Purpose |
 |---|---|
-| `src/agents/editor.py` | LangGraph node. Holds the `ReviewState` TypedDict (paper, round, reviews, a2a_thread, disagreements, verdict). Round 1: fan out to all four reviewers in parallel via LangGraph's parallel-edge primitive. |
-| `src/orchestrator/state.py` | The shared `ReviewState` TypedDict + helpers for safely merging parallel reviewer outputs. |
-| `src/orchestrator/disagreement.py` | Pure-function module: takes 4 reviews → returns a list of `Disagreement` objects. Uses two signals: (a) cosine distance between review-summary embeddings (sentence-transformers, reused from RAG server), (b) explicit contradictions in concern lists (same claim, opposite severity). Threshold defaults from `Config.DISAGREEMENT_THRESHOLD`. |
-| `src/orchestrator/graph.py` | LangGraph wiring. Defines nodes (each reviewer + editor), edges (paper → fan-out → editor), and the conditional edge that exits early if no disagreements above threshold. |
-| `scripts/test_round1.py` | Runs the LangGraph end-to-end for a single paper, prints the disagreement matrix, dumps state to `data/round1_state.json`. |
+| [src/orchestrator/state.py](../src/orchestrator/state.py) | `ReviewState` TypedDict. Two reducer functions: `merge_reviews` (dict merge for parallel reviewer writes) and `extend_a2a` (append for Phase 6 debate thread). `total=False` so we can start with partial state. |
+| [src/orchestrator/disagreement.py](../src/orchestrator/disagreement.py) | `compute_pairwise_disagreements(reviews)` returns a `Disagreement` per pair. Two signals, both normalized 0-1: score_spread_norm (`|score_a - score_b|/9`) and summary_cosine_distance (1 - cosine similarity of MiniLM-embedded summaries). Combined 50/50. Flagged if ≥ `DISAGREEMENT_THRESHOLD` (default 0.35). |
+| [src/agents/editor.py](../src/agents/editor.py) | Editor LangGraph node. Computes disagreements + a naive aggregated `Verdict` from Round-1 reviews. Recommendation from mean score (≥7 = accept, ≥5 = revise, else reject); confidence from score std-dev. `contested_claims` stays empty in Phase 5 — populated in Phase 6 from A2A debate. |
+| [src/orchestrator/graph.py](../src/orchestrator/graph.py) | `build_round1_graph()`. Five nodes: the four reviewers + editor. Edges: `START → each reviewer` (parallel fan-out), `each reviewer → editor` (fan-in), `editor → END`. `_make_reviewer_node` factory wraps each reviewer class as an async LangGraph node. |
+| [src/schemas.py](../src/schemas.py) updated | Added `Disagreement` model; added `summary` field to `Verdict`. |
+| [scripts/test_round1.py](../scripts/test_round1.py) | Runs `graph.ainvoke(initial_state)` on the test paper, prints disagreement matrix sorted by combined score, prints the naive verdict, saves full graph state to `data/round1_graph/round1_state.json`. |
 
 ### Key design decisions
 
@@ -359,16 +360,66 @@ pairs disagree enough to warrant a debate round.
 - **Two-signal disagreement detection.** Embedding cosine alone is too noisy (two reviewers can write similar prose with opposite recommendations). Severity contradictions alone are too sparse (concerns rarely match by exact wording). Combining both is more robust.
 - **Naive aggregation in this phase.** A simple mean-of-overall-scores produces a placeholder verdict so we can compare against the post-debate verdict in Phase 6 (this comparison is the "no debate vs 3-round debate" ablation).
 
-### How verification will work
+### The fan-out/fan-in pattern in LangGraph
+
+Four `add_edge(START, reviewer)` calls schedule the reviewers in parallel
+automatically — LangGraph detects the multiple edges from a single node and
+runs them concurrently. Each reviewer returns `{"reviews": {reviewer_id: review}}`,
+which LangGraph merges into the shared `reviews` dict via the `merge_reviews`
+reducer declared on the state field. The editor node sees a populated 4-entry
+dict by the time it runs.
+
+This is the whole reason we chose LangGraph over CrewAI. `add_edge(START, A)`,
+`add_edge(START, B)`, ... → parallel execution with typed-state merging. In
+CrewAI this would require a custom `Flow` wrapping a manual `asyncio.gather`.
+
+### Verified results on *Attention Is All You Need*
+
+```
+REVIEWS SUMMARY
+  devils_advocate   score=7.0  concerns=3  tool_calls=8
+  ethics            score=8.0  concerns=2  tool_calls=6
+  methodology       score=7.0  concerns=5  tool_calls=4
+  novelty           score=8.5  concerns=1  tool_calls=7
+
+PAIRWISE DISAGREEMENT MATRIX
+  pair                             score_spread  cos_dist  combined  flagged
+  methodology vs novelty           1.50          0.483     0.325
+  ethics vs methodology            1.00          0.377     0.244
+  devils_advocate vs novelty       1.50          0.295     0.231
+  ethics vs novelty                0.50          0.397     0.226
+  devils_advocate vs ethics        1.00          0.249     0.180
+  devils_advocate vs methodology   0.00          0.339     0.170
+
+NAIVE AGGREGATED VERDICT
+  recommendation : accept
+  confidence     : 0.856
+  mean score     : 7.62  (±0.65 std-dev)
+  per_criterion  : 12 keys averaged across reviewers
+  concerns       : 0 critical, 5 major (deduplicated)
+```
+
+**Interpretation:** On this paper, no pair crosses the 0.35 threshold, so the
+panel is effectively in agreement — the Phase 6 debate loop would exit early
+on this paper. This is a *feature*, not a bug: the Transformer paper is a
+strong, well-known work; faking disagreement for demo purposes would be
+dishonest. To exercise the debate loop fully, Phase 6 needs a paper with more
+structural controversy (or we tune the threshold down).
+
+### Total state-object size
+
+The saved `data/round1_graph/round1_state.json` is ~45KB (4 reviews, 6
+disagreements, a verdict). This is the full system output after Round 1, ready
+for Phase 6 to consume and extend.
+
+### How to verify Phase 5
 
 ```bash
 .venv/Scripts/python.exe scripts/test_round1.py
 ```
 
-Expected:
-- Four reviews completed in parallel (~30-40s wall time, not 4× sequential).
-- Printed pairwise disagreement matrix (6 pairs, scores between 0 and 1).
-- A list of pairs above threshold (these become rebuttal-request targets in Phase 6).
+Expected wall time: ~60-100s (novelty reviewer is the bottleneck). Saves
+full graph state to `data/round1_graph/round1_state.json`.
 
 ---
 
