@@ -32,12 +32,20 @@ _TRANSIENT_MARKERS = ("429", "resource_exhausted", "503", "unavailable", "timeou
 
 def _is_transient(exc: BaseException) -> bool:
     msg = str(exc).lower()
-    return any(m in msg for m in _TRANSIENT_MARKERS)
+    if any(m in msg for m in _TRANSIENT_MARKERS):
+        return True
+    # Some providers (notably OpenRouter free-tier) intermittently return a
+    # response with `choices=None`, which the OpenAI client surfaces as
+    # "TypeError: 'NoneType' object is not iterable" inside parse_chat_completion.
+    # Treat that as transient.
+    if isinstance(exc, TypeError) and "iterable" in msg:
+        return True
+    return False
 
 from src.agents.llm_factory import Role, make_llm
 from src.clients.mcp_client import mcp_session, unwrap_tool_result
 from src.logging_setup import get_logger
-from src.schemas import Review, ReviewerId, ToolCall
+from src.schemas import A2AMessage, RebuttalOutcome, Review, ReviewerId, ToolCall
 
 log = get_logger(__name__)
 
@@ -61,6 +69,7 @@ class BaseReviewer(ABC):
     def __init__(self, temperature: float = 0.3) -> None:
         self.llm = make_llm(self.role, temperature=temperature)
         self.structured_llm = self.llm.with_structured_output(Review)
+        self.rebuttal_llm = self.llm.with_structured_output(RebuttalOutcome)
 
     @abstractmethod
     async def gather_context(
@@ -85,6 +94,93 @@ class BaseReviewer(ABC):
         result.tool_calls = tool_calls
         log.info(f"[{self.reviewer_id}] score={result.overall_score} concerns={len(result.concerns)}")
         return result
+
+    async def respond_to_rebuttals(
+        self,
+        prior_review: Review,
+        challenges: list[A2AMessage],
+        paper_path: str,
+    ) -> tuple[Review, str]:
+        """Respond to all rebuttal_request messages addressed to this reviewer in one round.
+
+        Returns:
+            (updated_review, rationale) — updated_review is the reviewer's new position
+            after considering the challenges; rationale explains what changed.
+
+        Policy:
+        - A reviewer MAY stand firm. Capitulation without evidence is discouraged in the prompt.
+        - `position_changed` is True only if the reviewer explicitly says so AND the score changed
+          by >= 0.5 or concerns were added/removed/re-graded.
+        """
+        from src.orchestrator.a2a import format_challenges_for_reviewer  # late import to avoid cycle
+
+        # Re-gather paper context so the reviewer can cite specific sections if defending.
+        async with _open_sessions(self.mcp_servers) as sessions:
+            paper_context, new_tool_calls = await self.gather_context(sessions, paper_path)
+
+        challenges_block = format_challenges_for_reviewer(challenges)
+
+        prompt_text = f"""You are the '{self.reviewer_id}' reviewer. You submitted a review earlier. Now you have received rebuttal requests from other reviewers who disagree with your position. You must decide, per challenge, whether to update your position or defend it.
+
+YOUR PRIOR REVIEW:
+  overall_score: {prior_review.overall_score}
+  summary: {prior_review.summary}
+  concerns:
+{chr(10).join(f'    - [{c.severity}/{c.confidence:.2f}] {c.claim}' for c in prior_review.concerns)}
+  strengths:
+{chr(10).join(f'    + {s}' for s in prior_review.strengths[:5])}
+
+CHALLENGES AGAINST YOUR POSITION THIS ROUND:
+{challenges_block}
+
+=== PAPER CONTEXT (abbreviated — you saw the full paper in Round 1) ===
+{paper_context[:8000]}
+=== END PAPER CONTEXT ===
+
+INSTRUCTIONS:
+1. Read every challenge. Identify which specific claims (if any) you accept,
+   partially accept, or reject.
+2. Produce an updated Review object reflecting your new position. If you concede
+   a concern, remove it or downgrade its severity. If you find you were wrong
+   on your score, change it. If the challenge is unpersuasive, keep your position
+   and explain why in the rationale.
+3. Set `position_changed` = true only if your overall_score moved by at least 0.5
+   OR you added/removed concerns OR you changed a concern's severity.
+4. The `rationale` field should be a short (2-4 sentence) explanation addressed
+   to the editor: what you updated and why, or why you declined to update.
+5. Do NOT capitulate just because you were challenged — weak concessions are worse
+   than honest disagreement. The system is designed to record contested claims.
+
+Your response MUST conform to the RebuttalOutcome schema.
+"""
+
+        messages = [HumanMessage(content=prompt_text)]
+        outcome: RebuttalOutcome = await self._invoke_rebuttal_with_retry(messages)
+
+        updated = outcome.updated_review
+        updated.reviewer_id = self.reviewer_id
+        # Append new tool_calls made during rebuttal to the audit trail
+        updated.tool_calls = [*prior_review.tool_calls, *new_tool_calls]
+        log.info(
+            f"[{self.reviewer_id}] rebuttal: score {prior_review.overall_score:.1f} -> {updated.overall_score:.1f}, "
+            f"position_changed={outcome.position_changed}, concerns {len(prior_review.concerns)}->{len(updated.concerns)}"
+        )
+        return updated, outcome.rationale
+
+    async def _invoke_rebuttal_with_retry(self, messages: list[Any]) -> RebuttalOutcome:
+        attempt_idx = 0
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(4),
+            wait=wait_exponential(multiplier=2, min=2, max=30),
+            retry=retry_if_exception(_is_transient),
+            reraise=True,
+        ):
+            attempt_idx += 1
+            with attempt:
+                if attempt_idx > 1:
+                    log.warning(f"[{self.reviewer_id}] rebuttal LLM retry attempt {attempt_idx}")
+                return await self.rebuttal_llm.ainvoke(messages)
+        raise RuntimeError("unreachable")
 
     async def _invoke_llm_with_retry(self, messages: list[Any]) -> Review:
         # Retry on transient provider errors: 429 rate-limit, 5xx upstream unavailability.

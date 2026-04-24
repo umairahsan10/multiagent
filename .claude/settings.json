@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(.venv/Scripts/python.exe -c \"from src.config import Config; print\\('DISAGREEMENT_THRESHOLD=', Config.DISAGREEMENT_THRESHOLD, ' MAX_DEBATE_ROUNDS=', Config.MAX_DEBATE_ROUNDS\\)\")"
     ]
   }
 }

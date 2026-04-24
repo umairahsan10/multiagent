@@ -13,7 +13,7 @@ The full design lives in [readme.md](../readme.md); this file is the build log.
 | 3 | stats_verifier + openalex + rag MCP servers | ✅ Done |
 | 4 | Novelty + Devil's Advocate + Ethics reviewers | ✅ Done |
 | 5 | Editor orchestrator + Round-1 fan-out + disagreement detection | ✅ Done |
-| 6 | A2A debate loop + contested-claims synthesis | ⏳ Planned |
+| 6 | A2A debate loop + contested-claims synthesis | ✅ Done |
 | 7 | Streamlit UI + evaluation harness | ⏳ Planned |
 | 8 | Hallucination auditor + ablations + report assets | ⏳ Planned |
 
@@ -423,21 +423,24 @@ full graph state to `data/round1_graph/round1_state.json`.
 
 ---
 
-## Phase 6 — A2A debate loop + contested-claims synthesis (PLANNED)
+## Phase 6 — A2A debate loop + contested-claims synthesis ✅ DONE
 
 **Goal:** when reviewers disagree, the editor brokers structured rebuttals.
 After up to 3 rounds, the editor synthesizes a verdict that explicitly preserves
 unresolved disagreements as "contested claims" rather than forcing consensus.
 
-### Files to create
+### Files created
 
 | File | Purpose |
 |---|---|
-| `src/orchestrator/a2a.py` | A2A message construction + routing. `make_rebuttal_request(challenger, target, claim)` produces a structured `A2AMessage`. The router appends to `state["a2a_thread"]` so the full exchange is auditable. |
-| `src/agents/rebuttal_handler.py` | Mixin or method added to `BaseReviewer`: when called with an `A2AMessage` of type `rebuttal_request`, the reviewer re-reads the relevant section of its own prior review and the challenger's evidence, then emits a `rebuttal_response` that either updates its position (with new `confidence`) or defends it (with new evidence). |
-| `src/orchestrator/graph.py` | Extended with the debate loop. Conditional edge: while round < `MAX_DEBATE_ROUNDS` and disagreements > threshold and at least one reviewer changed position last round, loop back to debate. Otherwise → synthesis. |
-| `src/agents/synthesis.py` | Final-verdict synthesizer (uses Editor LLM = Groq Llama 3.3 70B). Takes the full A2A thread + final reviews and emits a `Verdict` with `consensus_strengths`, `consensus_concerns`, and `contested_claims` (the part most automated reviewers omit). |
-| `scripts/test_full_debate.py` | E2E: paper in → 4 reviews → debate rounds → final verdict. Prints round-by-round summary and final verdict JSON. |
+| [src/orchestrator/a2a.py](../src/orchestrator/a2a.py) | A2A helpers. `build_rebuttal_requests(flagged, reviews, round)` emits two `A2AMessage`s per flagged pair (each reviewer is asked to respond to the other). `messages_for_reviewer` filters the thread; `format_challenges_for_reviewer` renders messages into a prompt-ready text block. The editor is the sender of all rebuttal_requests — peers never message each other directly. |
+| [src/agents/base_reviewer.py](../src/agents/base_reviewer.py) updates | Added `respond_to_rebuttals(prior_review, challenges, paper_path)` method. Re-gathers paper context (cached) + receives the challenger's summary + concerns + score. LLM produces a structured `RebuttalOutcome` (position_changed flag, rationale, updated Review). |
+| [src/agents/debate_round.py](../src/agents/debate_round.py) | LangGraph node. Filters the thread for messages addressed to each reviewer in the current round; runs `respond_to_rebuttals` for each in parallel via `asyncio.gather`. Emits `rebuttal_response` messages + `position_changed` `announcement`s into the A2A thread. Increments `state["round"]`. |
+| [src/agents/editor.py](../src/agents/editor.py) updates | Now debate-aware. After computing disagreements, calls `_detect_stalemate()` (reads announcements from the just-completed round). Routes via `should_continue_debate()` conditional-edge function: `debate_round` if (flagged AND round<MAX AND not stalemate), else `synthesis`. |
+| [src/agents/synthesis.py](../src/agents/synthesis.py) | Final-verdict node. LLM (Gemini 2.5 Flash-Lite — moved off Groq because Llama flattens nested-object structured output) reads all final reviews + full A2A thread + disagreement matrix and produces a `Verdict` with `contested_claims` populated. Prompt explicitly forbids inventing contested claims when reviewers actually converged. |
+| [src/orchestrator/graph.py](../src/orchestrator/graph.py) | New `build_debate_graph()`. Adds two nodes (`debate_round`, `synthesis`) and a conditional edge from `editor`. The debate_round → editor edge creates the loop. |
+| [src/schemas.py](../src/schemas.py) | Added `RebuttalOutcome`. |
+| [scripts/test_full_debate.py](../scripts/test_full_debate.py) | E2E: paper in → 4 reviews → debate rounds → final verdict. Prints round-by-round A2A thread (REQ/RES/ANN) and the contested_claims block. Saves to `data/full_debate/debate_state.json`. |
 
 ### Key design decisions
 
@@ -445,19 +448,71 @@ unresolved disagreements as "contested claims" rather than forcing consensus.
 - **Rebuttal requests are typed messages, not plain strings.** A `rebuttal_request` carries the challenger's specific claim, the target's prior position, and the request body. The target must respond in a typed `rebuttal_response` (structured output again). This is the heart of the A2A protocol claim — without typed messages it would be just chat.
 - **Position changes are first-class.** The rebuttal handler returns a `position_changed: bool` flag. The editor uses this to detect stalemate.
 
-### How verification will work
+### Three things had to be debugged
 
-```bash
-.venv/Scripts/python.exe scripts/test_full_debate.py
+1. **Stalemate off-by-one.** Editor was checking announcements at `round - 1` while debate_round emits them at `round`. Fixed in `_detect_stalemate`. Symptom: stalemate fired immediately after first debate round even when reviewers had updated.
+2. **Groq Llama can't do nested structured output.** `consensus_concerns: list[Concern]` returned `[["claim string", 0.8, ...]]` (array of arrays) instead of `[{"claim": ..., "severity": ..., ...}]`. Fix: moved `editor` role from Groq to Gemini. Synthesis is one call per paper, so Gemini's lower rate limit is fine.
+3. **OpenRouter Nemotron occasionally returns `choices=None`.** Surfaces as `TypeError: 'NoneType' object is not iterable` in the OpenAI client. Added to `_TRANSIENT_MARKERS` so retry catches it. Also shrank the rebuttal paper context from 20k → 8k chars (the reviewer already saw the full paper in Round 1).
+
+### Verified end-to-end on *Attention Is All You Need*
+
+```
+ROUND 1 — 4 reviewers in parallel
+  methodology      score=7.0  concerns=5
+  novelty          score=9.0  concerns=0
+  devils_advocate  score=7.0  concerns=3
+  ethics           score=8.0  concerns=2
+
+EDITOR R1 — 1/6 pairs flagged at threshold=0.25
+  methodology vs novelty   combined=0.331
+  → emits 2 rebuttal_requests for round 2
+
+ROUND 2 — both targets respond
+  methodology  7.0 → 7.0  (held position)
+  novelty      9.0 → 9.0  (held position)
+  → no announcements → stalemate detected
+
+EDITOR R2 → routes to synthesis
+
+SYNTHESIS (Gemini) — final verdict:
+  recommendation : revise
+  confidence     : 0.7
+  consensus concerns: 3
+  contested claims  : 1
+    "The Transformer model's performance generalizes well to tasks beyond machine translation."
+       methodology: disagreed | devils_advocate: disagreed | ethics: neutral | novelty: neutral
+       editor_note: methodology + devils_advocate raised concerns about generalization;
+                    ethics + novelty did not address it; debate did not converge.
+
+WALL TIME: 200.8s
 ```
 
-Expected:
-- Round 1: 4 reviews printed.
-- Round 2 (if disagreements): rebuttal requests + responses logged. Some reviewers update scores.
-- Round 3 (if still disagreeing): final round.
-- Synthesis: a `Verdict` with at least one `contested_claim` entry on a real-world paper.
+This is exactly the system's distinctive output: the verdict tells the author that
+the panel converged on a `revise` recommendation but **also** preserves the one
+specific claim — generalization-beyond-MT — where reviewers genuinely couldn't
+agree. Most automated review systems would have dropped that and forced a single
+verdict. Ours surfaces it as a `contested_claim` with each reviewer's position
+attached.
 
-A "healthy" debate shows score movement of ≥0.5 by at least one reviewer in round 2 or 3. If nobody ever updates, the rebuttal prompt isn't pushing hard enough.
+### The "no-debate vs debate" ablation is now possible
+
+We have:
+- [data/round1_graph/round1_state.json](../data/round1_graph/) — naive verdict from Round 1 only (Phase 5)
+- [data/full_debate/debate_state.json](../data/full_debate/) — verdict after debate (Phase 6)
+
+Compare side-by-side: Phase 5's verdict was "accept" (mean 7.62 → ≥7); Phase 6's
+post-debate verdict is "revise" with 1 contested_claim. The debate phase made the
+final answer more honest about the panel's actual disagreement. That's the
+ablation result for the report.
+
+### How to verify Phase 6
+
+```bash
+DISAGREEMENT_THRESHOLD=0.25 .venv/Scripts/python.exe scripts/test_full_debate.py
+```
+
+(env override is only needed if your `.env` still has the old 0.35 default;
+`Config` defaults to 0.25 now.) Wall time: ~3 min on the Transformer paper.
 
 ---
 

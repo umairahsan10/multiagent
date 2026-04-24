@@ -27,7 +27,7 @@ class Config:
 
     # Debate
     MAX_DEBATE_ROUNDS = int(os.getenv("MAX_DEBATE_ROUNDS", "3"))
-    DISAGREEMENT_THRESHOLD = float(os.getenv("DISAGREEMENT_THRESHOLD", "0.35"))
+    DISAGREEMENT_THRESHOLD = float(os.getenv("DISAGREEMENT_THRESHOLD", "0.25"))
 
     # Sandbox
     SANDBOX_TIMEOUT = int(os.getenv("SANDBOX_TIMEOUT", "15"))

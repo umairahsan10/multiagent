@@ -23,7 +23,7 @@ ROLE_TO_PROVIDER: dict[Role, Provider] = {
     "novelty": "openrouter",
     "devils_advocate": "groq",
     "ethics": "groq",       # moved off Gemini: free tier is 5 req/min, clashes with methodology
-    "editor": "groq",
+    "editor": "gemini",      # synthesis needs reliable nested structured output; Groq Llama flattens lists-of-objects
 }
 
 

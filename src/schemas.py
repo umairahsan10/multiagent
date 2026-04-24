@@ -80,6 +80,19 @@ class Disagreement(BaseModel):
     flagged: bool                # combined_score >= DISAGREEMENT_THRESHOLD
 
 
+class RebuttalOutcome(BaseModel):
+    """Structured output from a reviewer responding to one or more A2A rebuttal requests.
+
+    A reviewer receives all challenges against their position from a round and
+    produces (a) an updated Review reflecting whatever they were willing to
+    adjust, plus (b) a rationale explaining what they changed and why — or
+    defending their original position.
+    """
+    position_changed: bool
+    rationale: str
+    updated_review: Review
+
+
 class Verdict(BaseModel):
     recommendation: Literal["accept", "reject", "revise"]
     confidence: float = Field(ge=0.0, le=1.0)
