@@ -1,0 +1,116 @@
+{
+  "n_runs": 1,
+  "papers_with_ground_truth": 1,
+  "verdict_correlation": {
+    "n": 1,
+    "accuracy": 0.0,
+    "confusion": {
+      "accept": {
+        "accept": 0,
+        "revise": 1,
+        "reject": 0
+      },
+      "revise": {
+        "accept": 0,
+        "revise": 0,
+        "reject": 0
+      },
+      "reject": {
+        "accept": 0,
+        "revise": 0,
+        "reject": 0
+      }
+    },
+    "per_class": {
+      "accept": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0
+      },
+      "revise": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0
+      },
+      "reject": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0
+      }
+    }
+  },
+  "issue_detection_pr": {
+    "n_papers_with_gt": 1,
+    "similarity_threshold": 0.65,
+    "micro_precision": 0.0,
+    "micro_recall": 0.0,
+    "micro_f1": 0.0,
+    "totals": {
+      "tp": 0,
+      "fp": 8,
+      "fn": 3
+    },
+    "per_paper": [
+      {
+        "paper_id": "1706.03762.pdf",
+        "precision": 0.0,
+        "recall": 0.0,
+        "tp": 0,
+        "fp": 8,
+        "fn": 3
+      }
+    ]
+  },
+  "inter_agent_disagreement": {
+    "score_spread": {
+      "n": 6,
+      "mean": 0.75,
+      "std": 0.479,
+      "min": 0.0,
+      "max": 1.5
+    },
+    "summary_cosine_distance": {
+      "n": 6,
+      "mean": 0.294,
+      "std": 0.158,
+      "min": 0.08,
+      "max": 0.52
+    },
+    "combined_score": {
+      "n": 6,
+      "mean": 0.189,
+      "std": 0.105,
+      "min": 0.04,
+      "max": 0.343
+    },
+    "combined_histogram": [
+      1,
+      2,
+      2,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  "citation_hallucination_rate": {
+    "total_citations": 5,
+    "unverified_citations": 5,
+    "hallucination_rate": 1.0,
+    "by_reviewer": {
+      "ethics": {
+        "total": 1,
+        "unverified": 1,
+        "rate": 1.0
+      },
+      "novelty": {
+        "total": 4,
+        "unverified": 4,
+        "rate": 1.0
+      }
+    }
+  }
+}

@@ -14,7 +14,7 @@ The full design lives in [readme.md](../readme.md); this file is the build log.
 | 4 | Novelty + Devil's Advocate + Ethics reviewers | ✅ Done |
 | 5 | Editor orchestrator + Round-1 fan-out + disagreement detection | ✅ Done |
 | 6 | A2A debate loop + contested-claims synthesis | ✅ Done |
-| 7 | Streamlit UI + evaluation harness | ⏳ Planned |
+| 7 | Streamlit UI + evaluation harness | ✅ Done |
 | 8 | Hallucination auditor + ablations + report assets | ⏳ Planned |
 
 ---
@@ -516,20 +516,21 @@ DISAGREEMENT_THRESHOLD=0.25 .venv/Scripts/python.exe scripts/test_full_debate.py
 
 ---
 
-## Phase 7 — Streamlit UI + evaluation harness (PLANNED)
+## Phase 7 — Streamlit UI + evaluation harness ✅ DONE
 
 **Goal:** (a) a usable demo for the project presentation, (b) the evaluation
 infrastructure that produces the numbers in the IEEE report.
 
-### Files to create
+### Files created
 
 | File | Purpose |
 |---|---|
-| `app.py` | Streamlit app at the project root. File uploader for a PDF, "Run review" button, four reviewer panels showing each review with collapsible concern lists, a debate-thread visualization (timeline of A2A messages), and a final verdict card with `contested_claims` highlighted. ~150 lines. |
-| `src/evaluation/harness.py` | Batch runner: takes a list of `(pdf_path, ground_truth_decision)` tuples, runs the full pipeline on each, dumps results + metrics to JSON. |
-| `src/evaluation/metrics.py` | Four metric functions: `verdict_correlation` (system recommendation vs. real outcome), `issue_detection_pr` (precision/recall of system concerns vs. human-reviewer concerns — manual annotation comparison), `inter_agent_disagreement` (mean pairwise cosine distance, plotted as a histogram), `citation_hallucination_rate` (fraction of cited papers that fail OpenAlex verification). |
-| `scripts/fetch_openreview.py` | Pulls 30-50 papers + their human reviews + decisions from OpenReview (ICLR 2022-2024). Caches everything locally so the evaluation is reproducible offline. |
-| `scripts/run_evaluation.py` | Top-level: load OpenReview corpus → run harness → write `data/evaluation_results.json` and `data/evaluation_metrics.json`. |
+| [app.py](../app.py) | Streamlit demo. Sidebar = file uploader + run button + provider info; main area = final verdict card (recommendation, confidence bar, contested claims with per-reviewer position chips), debate thread (per-round expander), and per-reviewer tabs with full review + MCP tool-call audit trail. Uses `asyncio.run()` inside an `st.status` context. ~250 lines. |
+| [src/evaluation/metrics.py](../src/evaluation/metrics.py) | Four pure-function metrics: `verdict_correlation` (accuracy + per-class P/R/F1 + confusion matrix), `issue_detection_pr` (semantic-similarity matching at threshold 0.65), `inter_agent_disagreement` (mean/std/histogram of pairwise scores), `citation_hallucination_rate` (split into `collect_citation_candidates` + `citation_hallucination_rate(candidates, verified)` so MCP I/O happens at the call site, not in the metrics module). |
+| [src/evaluation/harness.py](../src/evaluation/harness.py) | `run_corpus(corpus_dir, results_dir, max_papers, use_cache)` — iterates PDFs, runs the debate graph on each, caches per-paper JSON. `_load_record` rehydrates cached JSON back into typed Pydantic objects so metrics can be re-computed without re-running the LLMs. |
+| [scripts/fetch_openreview.py](../scripts/fetch_openreview.py) | Reads `data/eval_corpus/arxiv_ids.txt` (one ID per line), downloads each as `<id>.pdf` to `data/eval_corpus/papers/`. Pragmatic choice over OpenReview API scraping — venue schemas vary too much for a robust general-purpose scraper. |
+| [scripts/run_evaluation.py](../scripts/run_evaluation.py) | Top-level. Runs harness, gathers all citation candidates, batch-resolves them through one OpenAlex MCP session, computes all 4 metrics, writes `data/eval_results/metrics.json`. CLI: `--max N` for smoke tests, `--no-cache` to re-run. |
+| [data/eval_corpus/](../data/eval_corpus/) | Seeded with 1 paper (`1706.03762.pdf`) + `ground_truth.json` so the smoke test runs out-of-the-box. |
 
 ### Key design decisions
 
@@ -537,17 +538,51 @@ infrastructure that produces the numbers in the IEEE report.
 - **Manual concern-overlap annotation is unavoidable.** Issue-detection P/R requires a human (the project author) to read 20 papers' worth of human + system reviews and judge which concerns overlap. Budget time for this — 20 thoroughly-annotated papers > 50 skimmed.
 - **Caching is critical.** Every OpenReview paper, every parsed PDF, every OpenAlex query, every ChromaDB embedding is cached. Re-running the evaluation must not re-hit external APIs.
 
-### How verification will work
+### One subtle async refactor
 
-```bash
-streamlit run app.py                                    # demo UI
-.venv/Scripts/python.exe scripts/fetch_openreview.py    # one-time corpus pull
-.venv/Scripts/python.exe scripts/run_evaluation.py      # full eval (~hours, runs overnight)
+Initial design had `citation_hallucination_rate(runs, verify_fn)` where
+`verify_fn` was a sync wrapper around an async OpenAlex call. That hit
+"Cannot run the event loop while another loop is running" because the outer
+`asyncio.run()` was already active. Fix: split the metric into two parts —
+`collect_citation_candidates(runs)` returns plain tuples, the eval script
+batch-resolves them async in a single OpenAlex MCP session, then
+`citation_hallucination_rate(candidates, verified)` computes the stat from the
+resolved dict. metrics.py stays pure-function with zero I/O.
+
+### Smoke test result (1 paper, full pipeline)
+
+```
+Verdict accuracy           : 0.0   (system: revise; ground truth: accept)
+Issue detection micro-F1   : 0.0   (semantic-match threshold of 0.65 too strict on small sample)
+Mean pairwise disagreement : combined=0.189
+Citation hallucination     : 1.0   (5/5 — citation extractor pulls year-windowed text, not titles)
 ```
 
-Expected outputs:
-- `data/evaluation_results.json` — full per-paper output (every review, debate thread, verdict).
-- `data/evaluation_metrics.json` — aggregate numbers ready to drop into the IEEE report.
+The pipeline runs end-to-end. Two metrics are honest-but-coarse on a single
+paper: the issue-detection match is conservative, and the citation extractor
+pulls noisy substrings. Phase 8's hallucination auditor will replace the
+naive citation candidate extraction with a proper title-level walker; the
+issue-detection number will firm up with more papers + manual annotation.
+
+### How to verify Phase 7
+
+```bash
+# Demo UI — opens at http://localhost:8501
+streamlit run app.py
+
+# Build corpus from arxiv_ids.txt
+.venv/Scripts/python.exe scripts/fetch_openreview.py
+
+# Run evaluation (smoke test on 1 paper)
+DISAGREEMENT_THRESHOLD=0.25 .venv/Scripts/python.exe scripts/run_evaluation.py --max 1
+
+# Full evaluation (only after you've populated arxiv_ids.txt + ground_truth.json)
+DISAGREEMENT_THRESHOLD=0.25 .venv/Scripts/python.exe scripts/run_evaluation.py
+```
+
+Per-paper graph state is cached in `data/eval_results/runs/<paper>.json` so
+re-running computes metrics from cache without re-burning LLM tokens. Use
+`--no-cache` to force re-run.
 
 ---
 

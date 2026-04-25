@@ -1,0 +1,10 @@
+{
+  "1706.03762.pdf": {
+    "decision": "accept",
+    "human_concerns": [
+      "no statistical significance tests for BLEU score comparisons",
+      "ablation study only covers attention head configurations",
+      "limited evaluation beyond machine translation"
+    ]
+  }
+}
